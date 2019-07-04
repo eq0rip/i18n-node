@@ -1064,7 +1064,7 @@ module.exports = (function() {
     } else {
       // No object notation, just return a mutator that performs array lookup and changes the value.
       return function(value) {
-        locales[locale][singular] = value;
+        locales[locale][singular] = locales[defaultLocale][singular];
         return value;
       };
     }
