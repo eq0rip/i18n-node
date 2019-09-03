@@ -8,8 +8,9 @@
 
 'use strict';
 
+
 // dependencies
-var vsprintf = require('sprintf-js').vsprintf,
+var {vsprintf} = require('sprintf-js'),
   fs = require('fs'),
   url = require('url'),
   path = require('path'),
@@ -22,7 +23,14 @@ var vsprintf = require('sprintf-js').vsprintf,
     require('make-plural/data/plurals.json')
   ),
   parseInterval = require('math-interval-parser').default;
+  const Redis = require('ioredis');
 
+  const redisClient = new Redis();
+  const syncReport = {
+    initial: false,
+    syncing: false,
+    startedTimeStamp: (new Date()).getTime()
+  }
 // exports an instance
 module.exports = (function() {
 
@@ -60,18 +68,19 @@ module.exports = (function() {
     queryParameter,
     register,
     updateFiles,
-    syncFiles;
+    syncFiles,
+    dataSourceModel;
 
   // public exports
   var i18n = {};
 
   i18n.version = '0.8.3';
 
-  i18n.configure = function i18nConfigure(opt) {
+  i18n.configure = async function i18nConfigure(opt) {
 
     // reset locales
     locales = {};
-
+    dataSourceModel = opt.dataSourceModel;
     // Provide custom API method aliases if desired
     // This needs to be processed before the first call to applyAPItoObject()
     if (opt.api && typeof opt.api === 'object') {
@@ -155,23 +164,27 @@ module.exports = (function() {
     // implicitly read all locales
     if (Array.isArray(opt.locales)) {
 
-      opt.locales.forEach(function(l) {
-        read(l);
-      });
+      // opt.locales.forEach(function(l) {
+      //   read(l);
+      // });
+
+      syncReport.initial = true;
+      await read();
+      syncReport.initial = false;
 
       // auto reload locale files when changed
       if (autoReload) {
 
         // watch changes of locale files (it's called twice because fs.watch is still unstable)
-        fs.watch(directory, function(event, filename) {
-          var localeFromFile = guessLocaleFromFile(filename);
+        // fs.watch(directory, async function(event, filename) {
+        //   var localeFromFile = guessLocaleFromFile(filename);
 
-          if (localeFromFile && opt.locales.indexOf(localeFromFile) > -1) {
-            logDebug('Auto reloading locale file "' + filename + '".');
-            read(localeFromFile);
-          }
+        //   if (localeFromFile && opt.locales.indexOf(localeFromFile) > -1) {
+        //     logDebug('Auto reloading locale file "' + filename + '".');
+        //     await read(localeFromFile);
+        //   }
 
-        });
+        // });
       }
     }
   };
@@ -515,7 +528,7 @@ module.exports = (function() {
   };
 
   i18n.addLocale = function i18nAddLocale(locale) {
-    read(locale);
+    // read(locale);
   };
 
   i18n.removeLocale = function i18nRemoveLocale(locale) {
@@ -830,7 +843,18 @@ module.exports = (function() {
    * read locale file, translate a msg and write to fs if new
    */
   var translate = function(locale, singular, plural, skipSyncToAllFiles) {
-
+    console.log('request to translate', {
+      locale,
+      singular
+    })
+    redisClient.get("translationRefreshRequired", function (_err, result) {
+      if (result === 'true' && !syncReport.syncing) {
+        read();
+        console.log('yes needed');
+      } else {
+        // console.log('no not needed');
+      }
+    });
     // add same key to all translations
     if (!skipSyncToAllFiles && syncFiles) {
       syncToAllFiles(singular, plural);
@@ -847,20 +871,22 @@ module.exports = (function() {
     }
 
     // attempt to read when defined as valid locale
-    if (!locales[locale]) {
-      read(locale);
-    }
+    // if (!locales[locale]) {
+    //   console.log('no locale 1111');
+    //   read(locale);
+    // }
 
-    // fallback to default when missed
-    if (!locales[locale]) {
+    // // fallback to default when missed
+    // if (!locales[locale]) {
 
-      logWarn('WARN: Locale ' + locale +
-        ' couldn\'t be read - check the context of the call to $__. Using ' +
-        defaultLocale + ' (default) as current locale');
+    //   logWarn('WARN: Locale ' + locale +
+    //     ' couldn\'t be read - check the context of the call to $__. Using ' +
+    //     defaultLocale + ' (default) as current locale');
 
-      locale = defaultLocale;
-      read(locale);
-    }
+    //   locale = defaultLocale;
+    //   console.log('no locale 222');
+    //   read(locale);
+    // }
 
     // dotnotaction add on, @todo: factor out
     var defaultSingular = singular;
@@ -1073,18 +1099,37 @@ module.exports = (function() {
   /**
    * try reading a file
    */
-  var read = function(locale) {
-    var localeFile = {},
-      file = getStorageFilePath(locale);
+  var read = async function() {
+    if (!syncReport.initial && syncReport.syncing) {
+      console.log('Old sync already in progress');
+      return true;
+    }
     try {
-      logDebug('read ' + file + ' for locale: ' + locale);
-      localeFile = fs.readFileSync(file);
+        syncReport.syncing = true;
+        syncReport.startedTimeStamp = (new Date()).getTime();
+      const sysTranslations = await dataSourceModel.find({
+        serviceId: "5d653eebfea8f5033e7e1ac7"
+      }).populate('languageId')
+      const allTranslations = {};
+      console.log('typeof', sysTranslations);
+      sysTranslations.forEach(singleTranslation => {
+        // console.log('sing==', singleTranslation.translations);
+        if (!allTranslations[singleTranslation.languageId.code]) {
+          allTranslations[singleTranslation.languageId.code] = {};
+          singleTranslation.translations.forEach(innerTrans => {
+            allTranslations[singleTranslation.languageId.code][innerTrans.key] = innerTrans.value;
+          })
+        }
+      });
+      
       try {
         // parsing filecontents to locales[locale]
-        locales[locale] = JSON.parse(localeFile);
+        locales = allTranslations;
+        syncReport.syncing = true;
       } catch (parseError) {
-        logError('unable to parse locales from file (maybe ' +
-          file + ' is empty or invalid json?): ', parseError);
+        syncReport.syncing = false;
+        // logError('unable to parse locales from file (maybe ' +
+        //   file + ' is empty or invalid json?): ', parseError);
       }
     } catch (readError) {
       // unable to read, so intialize that file
@@ -1092,56 +1137,58 @@ module.exports = (function() {
       // or locales[locale] are empty, which initializes an empty locale.json file
 
       // since the current invalid locale could exist, we should back it up
-      if (fs.existsSync(file)) {
-        logDebug('backing up invalid locale ' + locale + ' to ' + file + '.invalid');
-        fs.renameSync(file, file + '.invalid');
-      }
-
-      logDebug('initializing ' + file);
-      write(locale);
+      // if (fs.existsSync(file)) {
+      //   logDebug('backing up invalid locale ' + locale + ' to ' + file + '.invalid');
+      //   fs.renameSync(file, file + '.invalid');
+      // }
+      console.log(readError);
+      logDebug('initializing ');
+      // write(locale);
+      syncReport.syncing = false;
     }
   };
+  
 
   /**
    * try writing a file in a created directory
    */
   var write = function(locale) {
-    var stats, target, tmp;
+    // var stats, target, tmp;
 
-    // don't write new locale information to disk if updateFiles isn't true
-    if (!updateFiles) {
-      return;
-    }
+    // // don't write new locale information to disk if updateFiles isn't true
+    // if (!updateFiles) {
+    //   return;
+    // }
 
-    // creating directory if necessary
-    try {
-      stats = fs.lstatSync(directory);
-    } catch (e) {
-      logDebug('creating locales dir in: ' + directory);
-      fs.mkdirSync(directory, directoryPermissions);
-    }
+    // // creating directory if necessary
+    // try {
+    //   stats = fs.lstatSync(directory);
+    // } catch (e) {
+    //   logDebug('creating locales dir in: ' + directory);
+    //   fs.mkdirSync(directory, directoryPermissions);
+    // }
 
-    // first time init has an empty file
-    if (!locales[locale]) {
-      locales[locale] = {};
-    }
+    // // first time init has an empty file
+    // if (!locales[locale]) {
+    //   locales[locale] = {};
+    // }
 
-    // writing to tmp and rename on success
-    try {
-      target = getStorageFilePath(locale);
-      tmp = target + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(locales[locale], null, indent), 'utf8');
-      stats = fs.statSync(tmp);
-      if (stats.isFile()) {
-        fs.renameSync(tmp, target);
-      } else {
-        logError('unable to write locales to file (either ' +
-          tmp + ' or ' + target + ' are not writeable?): ');
-      }
-    } catch (e) {
-      logError('unexpected error writing files (either ' +
-        tmp + ' or ' + target + ' are not writeable?): ', e);
-    }
+    // // writing to tmp and rename on success
+    // try {
+    //   target = getStorageFilePath(locale);
+    //   tmp = target + '.tmp';
+    //   fs.writeFileSync(tmp, JSON.stringify(locales[locale], null, indent), 'utf8');
+    //   stats = fs.statSync(tmp);
+    //   if (stats.isFile()) {
+    //     fs.renameSync(tmp, target);
+    //   } else {
+    //     logError('unable to write locales to file (either ' +
+    //       tmp + ' or ' + target + ' are not writeable?): ');
+    //   }
+    // } catch (e) {
+    //   logError('unexpected error writing files (either ' +
+    //     tmp + ' or ' + target + ' are not writeable?): ', e);
+    // }
   };
 
   /**
